@@ -14,6 +14,7 @@ from serena.lsp.lsp_diagnostics import GroupedDiagnostics
 from serena.symbol import (
     LanguageServerSymbol,
     LanguageServerSymbolDictGrouper,
+    LanguageServerSymbolLocation,
     LanguageServerSymbolRetriever,
     ReferenceInLanguageServerSymbol,
     SymbolDictGrouper,
@@ -34,7 +35,7 @@ from serena.util.text_utils import TextOutputUtils, find_text_coordinates
 from solidlsp.lsp_protocol_handler.lsp_types import SymbolKind
 
 from ..facade import SUCCESS_RESULT, FacadeApi, ReferencedType, facade_method
-from ..representable import Renderer, RepresentableViaRenderer
+from ..representable import JsonObject, JsonObjectRenderer, Renderer, RepresentableViaRenderer
 
 if TYPE_CHECKING:
     from serena.agent import SerenaAgent
@@ -244,9 +245,10 @@ class LspReferenceCollectionRenderer(Renderer[LspReferenceCollection]):
     references without code, per-file counts and finally the total count if the length limit is exceeded.
     """
 
-    def __init__(self, agent: "SerenaAgent", max_answer_chars: int, grouper: SymbolDictGrouper):
+    def __init__(self, agent: "SerenaAgent", max_answer_chars: int, grouper: SymbolDictGrouper, include_context: bool = True):
         super().__init__(agent, max_answer_chars)
         self._grouper = grouper
+        self._include_context = include_context
 
     def render(self, obj: LspReferenceCollection) -> str:
         reference_dicts = []
@@ -264,7 +266,7 @@ class LspReferenceCollectionRenderer(Renderer[LspReferenceCollection]):
                 }
             )
 
-        result = self._to_json(self._grouper.group(reference_dicts))
+        result = self._to_json(self._grouper.group(reference_dicts if self._include_context else [dict(s) for s in ref_summaries]))
 
         # shortened result closures, from least to most aggressive shortening
         def make_refs_without_context() -> str:
@@ -277,7 +279,10 @@ class LspReferenceCollectionRenderer(Renderer[LspReferenceCollection]):
         def make_summary() -> str:
             return f"Found {len(ref_summaries)} references."
 
-        return self._limit_length(result, shortened_result_factories=[make_refs_without_context, make_per_file_counts, make_summary])
+        shortened: list[Callable[[], str]] = [make_per_file_counts, make_summary]
+        if self._include_context:
+            shortened.insert(0, make_refs_without_context)
+        return self._limit_length(result, shortened_result_factories=shortened)
 
 
 class LspDiagnostics(RepresentableViaRenderer):
@@ -536,39 +541,60 @@ class LspApi(FacadeApi):
     @facade_method(uses_project_server=True, corresponding_tool=FindReferencingSymbolsTool)
     def find_referencing_symbols(
         self,
-        name_path: str,
-        relative_path: str,
+        name_path: str | None = None,
+        relative_path: str = "",
         include_kinds: Sequence[int] = (),
         exclude_kinds: Sequence[int] = (),
         max_answer_chars: int = -1,
+        regex: str | None = None,
+        include_context: bool = True,
     ) -> LspReferenceCollection:
         """
-        Finds references to the symbol at the given `name_path`.
+        Finds references to a named declaration or a symbol occurrence in a source file.
 
         The result will contain metadata about the referencing symbols as well as a short code snippet around the reference.
 
-        :param name_path: name path of the symbol
+        :param name_path: name path of the symbol; omit when using regex
         :param relative_path: the relative path to the file containing the symbol for which to find references.
         :param include_kinds: (optional) limits results to the given LSP symbol kinds (integers, i.e. values of `SymbolKind`)
         :param exclude_kinds: optional list of LSP symbol kinds (integers, i.e. values of `SymbolKind`) to exclude.
+        :param regex: a regex with one capture group selecting a unique symbol occurrence in relative_path,
+            as in find_declaration. Use this for macros or other symbols absent from document symbols.
+        :param include_context: include source snippets around each reference; false returns caller names and line locations
         :return: the references to the symbol
         """
-        self._get_project().validate_relative_path(relative_path)
+        symbol_retriever = self._create_symbol_retriever()
+        try:
+            self._get_project().validate_relative_path(relative_path)
+        except ValueError:
+            ls = symbol_retriever.get_language_server(relative_path)
+            if not ls.PathWorkspaceStatus.from_relative_path(relative_path, ls).is_in_workspace_folder:
+                raise
 
         # file system sync needed for case where symbol finder does not perform a global search, updating everything
         if relative_path:
             self._get_project().ls_sync_file_system_changes()
 
-        symbol_retriever = self._create_symbol_retriever()
-        references = symbol_retriever.find_referencing_symbols(
-            name_path,
-            relative_file_path=relative_path,
-            include_body=False,  # it is probably never a good idea to include the body of the referencing symbols
-            include_kinds=self._parse_kinds(include_kinds),
-            exclude_kinds=self._parse_kinds(exclude_kinds),
-        )
-        contents_around_references = [self._retrieve_content_around_reference(ref) for ref in references]
-        renderer = LspReferenceCollectionRenderer(self._agent, max_answer_chars, self.references_grouper_)
+        if regex is not None:
+            location = self._find_symbol_location(symbol_retriever, relative_path, regex)
+            references = symbol_retriever.find_referencing_symbols_by_location(
+                location,
+                include_body=False,
+                include_kinds=self._parse_kinds(include_kinds),
+                exclude_kinds=self._parse_kinds(exclude_kinds),
+            )
+        else:
+            if name_path is None:
+                raise ValueError("Provide name_path or regex")
+            references = symbol_retriever.find_referencing_symbols(
+                name_path,
+                relative_file_path=relative_path,
+                include_body=False,
+                include_kinds=self._parse_kinds(include_kinds),
+                exclude_kinds=self._parse_kinds(exclude_kinds),
+            )
+        contents_around_references = [self._retrieve_content_around_reference(ref) if include_context else "" for ref in references]
+        renderer = LspReferenceCollectionRenderer(self._agent, max_answer_chars, self.references_grouper_, include_context)
         return LspReferenceCollection(references, contents_around_references, renderer)
 
     @facade_method(uses_project_server=True, corresponding_tool=FindImplementationsTool)
@@ -608,34 +634,14 @@ class LspApi(FacadeApi):
         renderer = LspSymbolCollectionRenderer(self._agent, max_answer_chars, output_params)
         return LspSymbolCollection(symbols, renderer, self._request_info(symbol_retriever, symbols, output_params))
 
-    @facade_method(uses_project_server=True, corresponding_tool=FindDeclarationTool)
-    def find_declaration(
+    def _find_symbol_location(
         self,
+        symbol_retriever: LanguageServerSymbolRetriever,
         relative_path: str,
         regex: str,
         containing_symbol_name_path: str | None = None,
-        include_body: bool = False,
-        include_info: bool = False,
-    ) -> LspSymbol:
-        r"""
-        Finds the declaration of a symbol based on an occurrence of the symbol in a source file, specified by a regex.
-
-        :param relative_path: the relative path to the source file containing the symbol for which to find the declaration.
-        :param regex: a regular expression with one group, where the group matches the symbol for which to perform the lookup.
-            For example, to find the declaration of the `process` method in a call like `obj.process()`,
-            pass an expression like "obj\.(process)\(process_input_arg=37\)".
-            Prefer regexes with sufficiently large context around the group to render the match unambiguous.
-            Uses Python syntax with MULTILINE and DOTALL flags enabled.
-        :param containing_symbol_name_path: optional name path of a containing symbol whose body shall be searched instead of the full file.
-        :param include_body: whether to include the symbol's body in the result. Default False.
-        :param include_info: whether to include additional info (hover-like). Default False.
-        :return: the declaring symbol
-        """
-        self._get_project().validate_relative_path(relative_path)
-        self._get_project().ls_sync_file_system_changes()
-        symbol_retriever = self._create_symbol_retriever()
-
-        # find relevant location for lookup
+    ) -> LanguageServerSymbolLocation:
+        """Locate a unique captured occurrence, optionally within a containing symbol."""
         editor = self._create_ls_code_editor(symbol_retriever)
         if not containing_symbol_name_path:
             content = editor.read_file(relative_path)
@@ -649,14 +655,59 @@ class LspApi(FacadeApi):
             assert coords is not None
             coords.line += body_line_numbers[0]
 
+        return LanguageServerSymbolLocation(relative_path=relative_path, line=coords.line, column=coords.col)
+
+    @facade_method(uses_project_server=True, corresponding_tool=FindDeclarationTool)
+    def find_declaration(
+        self,
+        relative_path: str,
+        regex: str,
+        containing_symbol_name_path: str | None = None,
+        include_body: bool = False,
+        include_info: bool = False,
+    ) -> LspSymbol | JsonObject:
+        r"""
+        Finds the declaration of a symbol based on an occurrence of the symbol in a source file, specified by a regex.
+
+        :param relative_path: the relative path to the source file containing the symbol for which to find the declaration.
+        :param regex: a regular expression with one group, where the group matches the symbol for which to perform the lookup.
+            For example, to find the declaration of the `process` method in a call like `obj.process()`,
+            pass an expression like "obj\.(process)\(process_input_arg=37\)".
+            Prefer regexes with sufficiently large context around the group to render the match unambiguous.
+            Uses Python syntax with MULTILINE and DOTALL flags enabled.
+        :param containing_symbol_name_path: optional name path of a containing symbol whose body shall be searched instead of the full file.
+        :param include_body: whether to include the symbol's body in the result. Default False.
+        :param include_info: whether to include additional info (hover-like). Default False.
+        :return: the declaring symbol, or its native LSP location with occurrence hover information
+            when the target has no document symbol; a full body is unavailable in that case
+        """
+        self._get_project().validate_relative_path(relative_path)
+        self._get_project().ls_sync_file_system_changes()
+        symbol_retriever = self._create_symbol_retriever()
+
+        # find relevant location for lookup
+        location = self._find_symbol_location(symbol_retriever, relative_path, regex, containing_symbol_name_path)
+        assert location.line is not None and location.column is not None
+
         # retrieve declaration
         defining_symbol = symbol_retriever.find_declaration(
-            relative_file_path=relative_path, line=coords.line, column=coords.col, include_body=include_body
+            relative_file_path=relative_path, line=location.line, column=location.column, include_body=include_body
         )
         if defining_symbol is None:
             raise ValueError(
-                f"No symbol declaration found at the location of the regex match. Location: {relative_path}:{coords.line}:{coords.col}."
+                f"No symbol declaration found at the location of the regex match. Location: {relative_path}:{location.line}:{location.column}."
             )
+
+        if not isinstance(defining_symbol, LanguageServerSymbol):
+            result: dict[str, Any] = {"declaration_location": defining_symbol, "symbol_details_available": False}
+            if include_info:
+                ls = symbol_retriever.get_language_server(relative_path)
+                hover = ls.request_hover(relative_path, location.line, location.column)
+                if hover:
+                    result["info"] = hover["contents"]
+            if include_body:
+                result["body_available"] = False
+            return JsonObject(result, JsonObjectRenderer(self._agent, -1))
 
         output_params = SymbolOutputParams(
             kind=True, relative_path=True, body_location=True, include_body=include_body, include_info=include_info

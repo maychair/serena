@@ -148,8 +148,12 @@ class PyreflyLanguageServer(SolidLanguageServer):
         line: int,
         column: int,
         include_body: bool = False,
+        *,
+        prefer_declaration: bool = False,
     ) -> ls_types.UnifiedSymbolInformation | None:
-        symbol = super().request_defining_symbol(relative_file_path, line, column, include_body=include_body)
+        symbol = super().request_defining_symbol(
+            relative_file_path, line, column, include_body=include_body, prefer_declaration=prefer_declaration
+        )
         if symbol is None or symbol.get("name") != "__init__":
             return symbol
 

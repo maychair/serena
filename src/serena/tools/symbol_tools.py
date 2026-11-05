@@ -168,27 +168,38 @@ class FindReferencingSymbolsTool(Tool, ToolMarkerSymbolicRead, LspApiMixin):
 
     def apply(
         self,
-        name_path: str,
-        relative_path: str,
+        name_path: str | None = None,
+        relative_path: str = "",
         include_kinds: list[int] = [],  # noqa: B006
         exclude_kinds: list[int] = [],  # noqa: B006
         max_answer_chars: int = -1,
+        regex: str | None = None,
+        include_context: bool = True,
     ) -> str:
         """
-        Finds references to the symbol at the given `name_path`. The result will contain metadata about the referencing symbols
+        Finds references to a named declaration or a symbol occurrence. The result will contain metadata about the referencing symbols
         as well as a short code snippet around the reference.
 
-        :param name_path: name path of the symbol
+        :param name_path: name path of the symbol; omit when using regex
         :param relative_path: the relative path to the file containing the symbol for which to find references.
         :param include_kinds: (optional) limits results to the given LSP symbol kinds (integers)
         :param exclude_kinds: optional list of LSP symbol kinds (integers) to exclude.
         :param max_answer_chars: max result length; -1 for default
+        :param regex: a regex with one capture group selecting a unique symbol occurrence in relative_path,
+            as in find_declaration. Use this for macros or other symbols absent from document symbols.
+        :param include_context: include source snippets around each reference; false returns caller names and line locations
         :return: a list of JSON objects with the symbols referencing the requested symbol
         """
         return (
             self._api()
             .find_referencing_symbols(
-                name_path, relative_path, include_kinds=include_kinds, exclude_kinds=exclude_kinds, max_answer_chars=max_answer_chars
+                name_path,
+                relative_path,
+                include_kinds=include_kinds,
+                exclude_kinds=exclude_kinds,
+                max_answer_chars=max_answer_chars,
+                regex=regex,
+                include_context=include_context,
             )
             .represent()
         )

@@ -1356,8 +1356,10 @@ class SolidLanguageServer(ABC):
         # determine whether the path is a file
         is_file = project_entry.is_file()
 
-        # check each directory component against always-ignored dirnames
-        if check_path_for_ignored_dirnames:
+        # apply directory exclusions only within the lexical project subtree
+        normalized_parts = Path(os.path.normpath(relative_path)).parts
+        is_external = bool(normalized_parts and normalized_parts[0] == os.pardir)
+        if check_path_for_ignored_dirnames and not is_external:
             rel_path_obj = project_entry.get_rel_path_obj()
             dir_parts = rel_path_obj.parts
             if project_entry.is_file():
@@ -1727,6 +1729,10 @@ class SolidLanguageServer(ABC):
         """
         request = self.DefinitionLocationRequest(self, relative_file_path, line, column)
         return request.execute()
+
+    def request_declaration(self, relative_file_path: str, line: int, column: int) -> list[ls_types.Location]:
+        """Resolve a declaration, using definitions for servers without a distinct declaration operation."""
+        return self.request_definition(relative_file_path, line, column)
 
     def _send_implementation_request(self, implementation_params: ImplementationParams) -> Definition | list[LocationLink] | None:
         return self.server.send.implementation(implementation_params)
@@ -2980,6 +2986,8 @@ class SolidLanguageServer(ABC):
         line: int,
         column: int,
         include_body: bool = False,
+        *,
+        prefer_declaration: bool = False,
     ) -> ls_types.UnifiedSymbolInformation | None:
         """
         Finds the symbol that defines the symbol at the given location.
@@ -2991,6 +2999,7 @@ class SolidLanguageServer(ABC):
         :param line: The 0-indexed line number.
         :param column: The 0-indexed column number.
         :param include_body: whether to include the body of the symbol in the result.
+        :param prefer_declaration: whether to resolve the declaration instead of an indexed implementation.
         :return: The symbol information for the definition, or None if not found.
         """
         if not self.server_started:
@@ -2998,7 +3007,8 @@ class SolidLanguageServer(ABC):
             raise SolidLSPException("Language Server not started")
 
         # Get the definition location(s)
-        definitions = self.request_definition(relative_file_path, line, column)
+        request = self.request_declaration if prefer_declaration else self.request_definition
+        definitions = request(relative_file_path, line, column)
         if not definitions:
             return None
 

@@ -445,3 +445,23 @@ class TestHoverBudget:
         # Global budget is 10s, all 3 should succeed
         assert call_count == 3
         assert all(info is not None for info in result.values())
+
+
+def test_declaration_preserves_backend_symbol_normalization(monkeypatch: pytest.MonkeyPatch):
+    """Declaration navigation must retain backend handling of constructor targets."""
+    project = MagicMock(spec=Project)
+    retriever = LanguageServerSymbolRetriever(project)
+    server = MagicMock()
+    monkeypatch.setattr(retriever, "get_language_server", MagicMock(return_value=server))
+    server.request_defining_symbol.return_value = {"name": "SDKValue", "kind": 5, "children": []}
+    server.request_symbol_at_location.return_value = {"name": "__init__", "kind": 6, "children": []}
+    server.request_declaration.return_value = [{"relativePath": "library.py", "range": {"start": {"line": 1, "character": 4}}}]
+    server._get_preferred_definition.side_effect = lambda locations: locations[0]
+
+    declaration = retriever.find_declaration("main.py", 2, 11, include_body=True)
+
+    assert isinstance(declaration, LanguageServerSymbol)
+    assert declaration.name == "SDKValue"
+    server.request_defining_symbol.assert_called_once_with(
+        relative_file_path="main.py", line=2, column=11, include_body=True, prefer_declaration=True
+    )

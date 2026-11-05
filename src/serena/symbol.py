@@ -951,7 +951,7 @@ class LanguageServerSymbolRetriever:
         line: int,
         column: int,
         include_body: bool = False,
-    ) -> LanguageServerSymbol | None:
+    ) -> LanguageServerSymbol | ls_types.Location | None:
         """
         Find the declaration/definition of the symbol at the given file position.
 
@@ -959,7 +959,8 @@ class LanguageServerSymbolRetriever:
         :param line: the 0-based line number of the symbol usage.
         :param column: the 0-based column number of the symbol usage.
         :param include_body: whether to include the body of the defining symbol in the result.
-        :return: the defining symbol, or None if no definition could be resolved.
+        :return: the declaring symbol, its LSP location when document symbols are unavailable,
+            or None if no declaration could be resolved.
         """
         lang_server = self.get_language_server(relative_file_path)
         defining_symbol = lang_server.request_defining_symbol(
@@ -967,10 +968,12 @@ class LanguageServerSymbolRetriever:
             line=line,
             column=column,
             include_body=include_body,
+            prefer_declaration=True,
         )
-        if defining_symbol is None:
-            return None
-        return LanguageServerSymbol(defining_symbol)
+        if defining_symbol is not None:
+            return LanguageServerSymbol(defining_symbol)
+        declarations = lang_server.request_declaration(relative_file_path, line, column)
+        return lang_server._get_preferred_definition(declarations) if declarations else None
 
     def get_file_diagnostics(
         self,

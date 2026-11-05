@@ -39,6 +39,15 @@ Status of the `main` branch. Changes prior to the next official version change w
   - C/C++ (clangd) logs errors only (`--log=error`) instead of a line for every request and parse, unless
     `ls_extra_args` sets `--log` or Serena logs at debug level
   - Fix: every line a language server wrote to stderr was followed by an empty line in Serena's log
+  - Fix: External dependency declarations are not excluded by project-local build or virtualenv
+    ignore rules; generated C/C++ include files retain native locations when document symbols are unavailable.
+  - Reference queries can return caller names and line locations without source snippets.
+  - Fix: Reference lookup accepts declarations in configured language workspaces
+    and symbol occurrences, including macros, through the existing LSP reference operation.
+  - Fix: C/C++ declaration navigation uses clangd's declaration operation, keeping SDK
+    declarations distinct from indexed test implementations; definition lookup is unchanged.
+  - Fix: C/C++ macro declaration navigation now returns the definition and hover information
+    when clangd resolves the macro but omits it from document symbols.
 
 # v2.1.0 (2026-10-19)
 

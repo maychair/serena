@@ -545,6 +545,11 @@ def match_path(relative_path: str, path_spec: PathSpec, root_path: str = "", is_
 
     normalized_path = str(relative_path).replace(os.path.sep, "/")
 
+    # keep root-relative ignore patterns within their lexical project subtree
+    normalized_parts = Path(os.path.normpath(relative_path)).parts
+    if normalized_parts and normalized_parts[0] == os.pardir:
+        return False
+
     # We can have patterns like /src/..., which would only match corresponding paths from the repo root
     # Unfortunately, pathspec can't know whether a relative path is relative to the repo root or not,
     # so it will never match src/...
