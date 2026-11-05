@@ -4,16 +4,25 @@ import hashlib
 import json
 import logging
 import os
+import re
 import threading
 from collections.abc import Hashable
 from typing import Any
 
 from overrides import override
 
+from solidlsp import ls_types
 from solidlsp.language_servers.common import UE_IGNORED_DIRNAMES
-from solidlsp.ls import LanguageServerDependencyProvider, LanguageServerDependencyProviderSinglePath, ProcessLaunchInfo, SolidLanguageServer
+from solidlsp.ls import (
+    LanguageServerDependencyProvider,
+    LanguageServerDependencyProviderSinglePath,
+    ProcessLaunchInfo,
+    SolidLanguageServer,
+    SymbolBodyFactory,
+)
 from solidlsp.ls_config import LanguageServerConfig
 from solidlsp.ls_exceptions import SolidLSPException
+from solidlsp.lsp_protocol_handler.lsp_types import SymbolKind
 from solidlsp.settings import SolidLSPSettings
 
 from .common import RuntimeDependency, RuntimeDependencyCollection, is_unreal_engine_project
@@ -35,6 +44,60 @@ class ClangdLanguageServer(SolidLanguageServer):
         - clangd_version: Override the pinned Clangd version downloaded by Serena
           (default: the bundled Serena version).
     """
+
+    class DeclarationLocationRequest(SolidLanguageServer.DefinitionLocationRequest):
+        @override
+        def send_request(self) -> object | None:
+            return self.language_server.server.send.declaration(
+                self.language_server._create_text_document_position_params(self.relative_file_path, self.line, self.column)
+            )
+
+    @override
+    def request_declaration(self, relative_file_path: str, line: int, column: int) -> list[ls_types.Location]:
+        return self.DeclarationLocationRequest(self, relative_file_path, line, column, request_name="request_declaration").execute()
+
+    @override
+    def _request_symbol_at_location(
+        self,
+        relative_file_path: str,
+        line: int,
+        column: int,
+        include_body: bool = False,
+        body_factory: SymbolBodyFactory | None = None,
+    ) -> ls_types.UnifiedSymbolInformation | None:
+        # represent macro declarations at their resolved definition location
+        with self._open_file_context(relative_file_path) as fb:
+            lines = fb.split_lines()
+            match = re.match(r"\s*#\s*define\s+(\w+)", lines[line])
+            if match and match.start(1) <= column < match.end(1):
+                last_line = line
+                while lines[last_line].rstrip("\r\n").endswith("\\") and last_line + 1 < len(lines):
+                    last_line += 1
+                selection_range: ls_types.Range = {
+                    "start": {"line": line, "character": match.start(1)},
+                    "end": {"line": line, "character": match.end(1)},
+                }
+                body_range: ls_types.Range = {
+                    "start": {"line": line, "character": len(lines[line]) - len(lines[line].lstrip())},
+                    "end": {"line": last_line, "character": len(lines[last_line].rstrip("\r\n"))},
+                }
+                symbol: ls_types.UnifiedSymbolInformation = {
+                    "name": match.group(1),
+                    "kind": SymbolKind.Constant,
+                    "location": {
+                        "uri": self._resolve_file_uri(relative_file_path),
+                        "relativePath": relative_file_path,
+                        "absolutePath": os.path.abspath(os.path.join(self.repository_root_path, relative_file_path)),
+                        "range": body_range,
+                    },
+                    "selectionRange": selection_range,
+                    "children": [],
+                }
+                if include_body:
+                    symbol["body"] = self.create_symbol_body(symbol, factory=body_factory or SymbolBodyFactory(fb))
+                return symbol
+
+        return super()._request_symbol_at_location(relative_file_path, line, column, include_body, body_factory)
 
     @staticmethod
     def _determine_log_level(line: str) -> int:

@@ -194,3 +194,37 @@ def test_location_at_existing_source_path_is_converted(tmp_path: Path) -> None:
     assert location is not None
     assert Path(location["absolutePath"]) == source_file
     assert Path(location["relativePath"]) == Path("pkg/mod.py")
+
+
+def test_repository_ignore_patterns_do_not_hide_external_generated_headers(tmp_path: Path) -> None:
+    root = tmp_path / "checkout"
+    root.mkdir()
+    ls = _IgnoredPathServer(root, LanguageServerId.CPP, ignore_lines=("build/",))
+    external = tmp_path / "dependencies" / "build" / "include" / "Types.h.inc"
+    internal = root / "build" / "include" / "Types.h.inc"
+    for header in (external, internal):
+        header.parent.mkdir(parents=True)
+        header.write_text("int generated();\n")
+
+    location = _location_request(ls).convert_location_item(_location_item(external))
+    assert location is not None
+    assert Path(location["absolutePath"]) == external
+    assert _location_request(ls).convert_location_item(_location_item(internal)) is None
+
+
+@pytest.mark.parametrize("dirname", ["venv", ".venv", "__pycache__"])
+def test_directory_exclusions_do_not_hide_external_python_declarations(tmp_path: Path, dirname: str) -> None:
+    root = tmp_path / "checkout"
+    root.mkdir()
+    ls = _IgnoredPathServer(root, LanguageServerId.PYTHON, ignored_dirnames=("venv", "__pycache__"))
+    external = tmp_path / "dependencies" / dirname / "site-packages" / "pkg" / "ops.py"
+    internal = root / dirname / "site-packages" / "pkg" / "ops.py"
+    for source in (external, internal):
+        source.parent.mkdir(parents=True)
+        source.write_text("def forward(): pass\n")
+
+    location = _location_request(ls).convert_location_item(_location_item(external))
+    assert location is not None
+    assert Path(location["absolutePath"]) == external
+    assert _location_request(ls).convert_location_item(_location_item(internal)) is None
+    assert ls.is_ignored_path(f"../dependencies/{dirname}/module.pyc") is True

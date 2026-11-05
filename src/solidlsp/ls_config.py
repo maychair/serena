@@ -502,7 +502,8 @@ class LanguageServerId(Enum):
                     ".hh",
                     ".hpp",
                     ".hxx",
-                    # C++ include files
+                    # C/C++ include files; compilation flags select the language.
+                    ".inc",
                     ".inl",
                     ".ipp",
                     ".tpp",
